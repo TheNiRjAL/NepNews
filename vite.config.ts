@@ -5,8 +5,8 @@ export default defineConfig({
   plugins: [react()],
   base: '/',
   define: {
-    // We no longer inject API_KEY here for security. 
-    // It is handled by the Netlify Function.
+    // Polyfill process.env for the browser to prevent crashes when accessing API keys
+    'process.env.API_KEY': JSON.stringify(process.env.API_KEY),
     'process.env': {}, 
   },
   build: {
