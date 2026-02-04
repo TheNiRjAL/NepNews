@@ -1,13 +1,28 @@
 import { GoogleGenAI } from "@google/genai";
 import { NewsItem, Party, HoroscopeItem, Language } from "../types";
 
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
-// We use gemini-3-flash-preview for fast, grounded responses
 const MODEL_NAME = "gemini-3-flash-preview";
+
+// Helper to initialize the client lazily.
+// This prevents the application from crashing at the top-level (White Screen) 
+// if 'process' is not defined or the API Key is missing during the initial bundle load.
+const getAiClient = () => {
+  try {
+    // We strictly use process.env.API_KEY as requested. 
+    // If the build tool hasn't replaced this, or we are in a browser without polyfills, 
+    // wrapping this in a function allows us to catch the error when the function is CALLED, not when the file is imported.
+    return new GoogleGenAI({ apiKey: process.env.API_KEY });
+  } catch (e) {
+    console.error("Failed to initialize Gemini Client. Missing API Key?", e);
+    // Return a dummy object or let the caller handle the throw
+    throw e;
+  }
+};
 
 export const fetchLatestNews = async (language: Language): Promise<{ news: NewsItem[], hotTopic?: string }> => {
   try {
+    const ai = getAiClient();
+    
     const langPrompt = language === 'np' 
       ? "IMPORTANT: Provide the output strictly in Nepali language (Devanagari script). Translate all headlines, summaries, and the hot topic."
       : "Provide the output in English.";
@@ -158,6 +173,7 @@ export const fetchPartyInsights = async (language: Language): Promise<Party[]> =
     ];
 
     try {
+        const ai = getAiClient();
         const langPrompt = isNp 
             ? "Write the DESC and STANCE in Nepali language (Devanagari script)." 
             : "Write the DESC and STANCE in English.";
@@ -233,6 +249,7 @@ export const fetchPartyInsights = async (language: Language): Promise<Party[]> =
 
 export const fetchDailyHoroscope = async (language: Language): Promise<HoroscopeItem[]> => {
     try {
+        const ai = getAiClient();
         const langInstruction = language === 'np' 
             ? "Provide the names of the signs in Nepali (Mesh, Brish, Mithun, Karkat, Simha, Kanya, Tula, Brishchik, Dhanu, Makar, Kumbha, Meen) and the prediction in Nepali." 
             : "Provide the names in English (Aries, Taurus, etc.) and prediction in English.";

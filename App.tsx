@@ -222,7 +222,10 @@ const App: React.FC = () => {
       <footer className="bg-gray-900 dark:bg-black text-gray-400 py-12 mt-auto transition-colors duration-300">
         <div className="max-w-7xl mx-auto px-4 text-center">
           <p className="font-serif text-lg text-gray-300 mb-2">{t.title}</p>
-          <p className="text-sm">{t.footer}</p>
+          <p className="text-sm mb-2">{t.footer}</p>
+          <p className="text-sm font-semibold tracking-wider">
+            <span className="text-nepal-gold">_NiRjAL_</span>
+          </p>
         </div>
       </footer>
 
