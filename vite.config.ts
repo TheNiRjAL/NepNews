@@ -5,9 +5,7 @@ export default defineConfig({
   plugins: [react()],
   base: '/',
   define: {
-    // Polyfill process.env for the browser to prevent crashes when accessing API keys
-    'process.env.API_KEY': JSON.stringify(process.env.API_KEY),
-    'process.env': {}, 
+    'process.env': {}, // Clear env to prevent accidental leakage
   },
   build: {
     outDir: 'dist',

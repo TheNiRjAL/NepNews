@@ -1,295 +1,194 @@
-import { GoogleGenAI } from "@google/genai";
 import { NewsItem, Party, HoroscopeItem, Language } from "../types";
 
-const MODEL_NAME = "gemini-3-flash-preview";
+// --- MOCK DATA (Fallback for Localhost/Studio/Errors) ---
+const MOCK_NEWS = {
+  en: [
+    { id: 'm1', title: "Election Date Announced", summary: "The Election Commission has finalized the schedule for the upcoming by-elections.", source: "Kathmandu Post", timestamp: "10:00 AM" },
+    { id: 'm2', title: "Coalition Meeting Underway", summary: "Leaders of the ruling coalition are meeting at Baluwatar to discuss seat sharing.", source: "The Himalayan Times", timestamp: "11:30 AM" },
+    { id: 'm3', title: "New Party Registration", summary: "RSP has opened registration for new candidates across 3 districts.", source: "OnlineKhabar", timestamp: "12:15 PM" }
+  ],
+  np: [
+    { id: 'm1', title: "उपनिर्वाचनको मिति घोषणा", summary: "निर्वाचन आयोगले आगामी उपनिर्वाचनको कार्यतालिका सार्वजनिक गरेको छ।", source: "कान्तिपुर", timestamp: "१०:००" },
+    { id: 'm2', title: "सत्ता गठबन्धनको बैठक सुरु", summary: "सिट बाँडफाँडको विषयमा छलफल गर्न शीर्ष नेताहरू बालुवाटारमा।", source: "अनलाइन खबर", timestamp: "११:३०" },
+    { id: 'm3', title: "रास्वपाको उम्मेदवारी दर्ता", summary: "राष्ट्रिय स्वतन्त्र पार्टीले ३ जिल्लामा उम्मेदवारी दर्ता खोलेको छ।", source: "रातोपाटी", timestamp: "१२:१५" }
+  ]
+};
 
-// Helper to initialize the client lazily.
-// This prevents the application from crashing at the top-level (White Screen) 
-// if 'process' is not defined or the API Key is missing during the initial bundle load.
-const getAiClient = () => {
+// --- API FETCH LOGIC ---
+
+const fetchFromApi = async (type: 'news' | 'parties' | 'horoscope', language: Language) => {
   try {
-    // We strictly use process.env.API_KEY as requested. 
-    // If the build tool hasn't replaced this, or we are in a browser without polyfills, 
-    // wrapping this in a function allows us to catch the error when the function is CALLED, not when the file is imported.
-    return new GoogleGenAI({ apiKey: process.env.API_KEY });
-  } catch (e) {
-    console.error("Failed to initialize Gemini Client. Missing API Key?", e);
-    // Return a dummy object or let the caller handle the throw
-    throw e;
+    console.log(`[Network] Fetching ${type} from /api/gemini...`);
+    
+    // Use relative path - works automatically on Vercel
+    const response = await fetch('/api/gemini', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type, language }),
+    });
+
+    // Handle 404 (API not found) - Common in Localhost/Studio without Vercel CLI
+    if (response.status === 404) {
+      console.warn("[Network] /api/gemini not found (404). Assuming Local/Preview mode. Using Mock Data.");
+      return null; // Return null to trigger mock
+    }
+
+    // Handle 500+ (Server Error)
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error(`[Network] API Error ${response.status}:`, errText);
+      throw new Error(`Server Error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    if (!data.text) throw new Error("Received empty data from API");
+    
+    return data;
+
+  } catch (error: any) {
+    // Handle Offline / Network Failure
+    if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
+        console.error("[Network] Connection Failed. The device might be offline.");
+        throw new Error("No Internet Connection");
+    }
+    
+    console.error("[Network] Fetch Exception:", error);
+    throw error;
   }
 };
 
+// --- EXPORTED FUNCTIONS ---
+
 export const fetchLatestNews = async (language: Language): Promise<{ news: NewsItem[], hotTopic?: string }> => {
+  const isNp = language === 'np';
+  
   try {
-    const ai = getAiClient();
-    
-    const langPrompt = language === 'np' 
-      ? "IMPORTANT: Provide the output strictly in Nepali language (Devanagari script). Translate all headlines, summaries, and the hot topic."
-      : "Provide the output in English.";
+    const data = await fetchFromApi('news', language);
 
-    const response = await ai.models.generateContent({
-      model: MODEL_NAME,
-      contents: `Find the absolute latest news (last 24-48 hours) regarding the political situation and upcoming elections in Nepal. 
-      Focus on major parties (NC, UML, Maoist, RSP, RPP). 
-      Also, identify ONE major "Hot Topic" or controversy currently trending.
-      
-      ${langPrompt}
-      
-      Format the output strictly as follows:
-      HOT_TOPIC: [The hot topic summary]
-      ---
-      HEADLINE: [News Title 1]
-      SUMMARY: [Brief summary of news 1]
-      SOURCE: [Source Name]
-      ---
-      HEADLINE: [News Title 2]
-      SUMMARY: [Brief summary of news 2]
-      SOURCE: [Source Name]
-      
-      (Provide 5 news items)`,
-      config: {
-        tools: [{ googleSearch: {} }],
-        temperature: 0.3,
-      },
-    });
-
-    const text = response.text || "";
-    
-    // Parse the text manually since we can't use JSON schema with Search Grounding reliably in all cases yet
-    // and we want to preserve the "freshness" from the grounding.
-    
-    const lines = text.split('\n');
-    let hotTopic = language === 'np' ? "निर्वाचन अपडेट" : "Election Updates";
-    const news: NewsItem[] = [];
-    
-    let currentNews: Partial<NewsItem> = {};
-    
-    lines.forEach(line => {
-      const cleanLine = line.trim();
-      if (cleanLine.startsWith('HOT_TOPIC:')) {
-        hotTopic = cleanLine.replace('HOT_TOPIC:', '').trim();
-      } else if (cleanLine.startsWith('HEADLINE:')) {
-        if (currentNews.title) {
-          news.push(currentNews as NewsItem);
-        }
-        currentNews = {
-          id: Math.random().toString(36).substr(2, 9),
-          title: cleanLine.replace('HEADLINE:', '').trim(),
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        };
-      } else if (cleanLine.startsWith('SUMMARY:')) {
-        if (currentNews) currentNews.summary = cleanLine.replace('SUMMARY:', '').trim();
-      } else if (cleanLine.startsWith('SOURCE:')) {
-        if (currentNews) currentNews.source = cleanLine.replace('SOURCE:', '').trim();
-      } else if (cleanLine === '---' && currentNews.title) {
-         // Delimiter handling if needed, but the headline check covers it
-      }
-    });
-    
-    if (currentNews.title) {
-      news.push(currentNews as NewsItem);
+    // If data is null, it means 404/Local mode -> Show Mock
+    if (!data) {
+        return { news: MOCK_NEWS[language], hotTopic: isNp ? "मोक डाटा (प्रिभ्यु मोड)" : "Mock Data (Preview Mode)" };
     }
     
-    // Attempt to extract URLs from grounding chunks to attach to news items
-    const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
-    // This is a rough mapping strategy: assign available chunks to news items sequentially
-    // A production app would need smarter entity matching.
+    const lines = data.text.split('\n');
+    let hotTopic = isNp ? "निर्वाचन अपडेट" : "Election Updates";
+    const news: NewsItem[] = [];
+    let current: Partial<NewsItem> = {};
+    
+    lines.forEach((line: string) => {
+      const clean = line.trim();
+      if (clean.startsWith('HOT_TOPIC:')) hotTopic = clean.replace('HOT_TOPIC:', '').trim();
+      else if (clean.startsWith('HEADLINE:')) {
+        if (current.title) news.push(current as NewsItem);
+        current = { id: Math.random().toString(36).substr(2, 9), title: clean.replace('HEADLINE:', '').trim(), timestamp: new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) };
+      }
+      else if (clean.startsWith('SUMMARY:')) if (current) current.summary = clean.replace('SUMMARY:', '').trim();
+      else if (clean.startsWith('SOURCE:')) if (current) current.source = clean.replace('SOURCE:', '').trim();
+    });
+    if (current.title) news.push(current as NewsItem);
+    
+    const chunks = data.groundingChunks || [];
     news.forEach((item, index) => {
-        if (index < chunks.length && chunks[index].web?.uri) {
-            item.url = chunks[index].web?.uri;
-        }
+        if (index < chunks.length && chunks[index].web?.uri) item.url = chunks[index].web?.uri;
     });
 
     return { news, hotTopic };
 
-  } catch (error) {
-    console.error("Failed to fetch news:", error);
-    const isNp = language === 'np';
+  } catch (error: any) {
+    // Fallback for real errors (No Internet, 500, etc)
+    const isNetworkError = error.message === "No Internet Connection";
+    
     return { 
-      news: [
-        {
-            id: 'error-1',
-            title: isNp ? 'सिस्टम अपडेट' : 'System Update',
-            summary: isNp ? 'यस समयमा प्रत्यक्ष समाचार ल्याउन असमर्थ। कृपया आफ्नो इन्टरनेट जाँच गर्नुहोस्।' : 'Unable to fetch live news at this moment. Please check your connection.',
-            source: 'System',
-            timestamp: new Date().toLocaleTimeString()
-        }
-      ], 
-      hotTopic: isNp ? 'जडान समस्या' : 'Connection Issue' 
+      news: [{ 
+          id: 'err', 
+          title: isNp ? 'जडान त्रुटि' : 'Connection Error', 
+          summary: isNetworkError 
+            ? (isNp ? 'इन्टरनेट जडान छैन। कृपया जाँच गर्नुहोस्।' : 'No internet connection. Please check your network.')
+            : (isNp ? 'सर्भरमा समस्या आयो।' : 'Service temporarily unavailable.'),
+          source: 'System', 
+          timestamp: new Date().toLocaleTimeString() 
+      }], 
+      hotTopic: 'Error' 
     };
   }
 };
 
 export const fetchPartyInsights = async (language: Language): Promise<Party[]> => {
     const isNp = language === 'np';
-    
-    // We will hardcode the base structure for stability and use AI to fetch the "Latest Stance"
     const baseParties = [
-        { 
-            name: "Nepali Congress", 
-            nameNp: "नेपाली कांग्रेस",
-            fullName: "Nepali Congress",
-            fullNameNp: "नेपाली कांग्रेस",
-            symbol: "🌳", 
-            color: "bg-green-600", 
-            imageUrl: "https://picsum.photos/id/1018/400/300" 
-        },
-        { 
-            name: "CPN (UML)", 
-            nameNp: "नेकपा (एमाले)",
-            fullName: "Communist Party of Nepal (Unified Marxist–Leninist)",
-            fullNameNp: "नेपाल कम्युनिष्ट पार्टी (एकीकृत मार्क्सवादी-लेनिनवादी)",
-            symbol: "☀️", 
-            color: "bg-red-600", 
-            imageUrl: "https://picsum.photos/id/1015/400/300" 
-        },
-        { 
-            name: "Maoist Centre", 
-            nameNp: "माओवादी केन्द्र",
-            fullName: "CPN (Maoist Centre)",
-            fullNameNp: "नेकपा (माओवादी केन्द्र)",
-            symbol: "☭", 
-            color: "bg-red-800", 
-            imageUrl: "https://picsum.photos/id/1033/400/300" 
-        },
-        { 
-            name: "RSP", 
-            nameNp: "रास्वपा",
-            fullName: "Rastriya Swatantra Party",
-            fullNameNp: "राष्ट्रिय स्वतन्त्र पार्टी",
-            symbol: "🔔", 
-            color: "bg-blue-500", 
-            imageUrl: "https://picsum.photos/id/1025/400/300" 
-        },
-        { 
-            name: "RPP", 
-            nameNp: "राप्रपा",
-            fullName: "Rastriya Prajatantra Party",
-            fullNameNp: "राष्ट्रिय प्रजातन्त्र पार्टी",
-            symbol: "🚜", 
-            color: "bg-yellow-500", 
-            imageUrl: "https://picsum.photos/id/1040/400/300" 
-        },
+        { name: "Nepali Congress", nameNp: "नेपाली कांग्रेस", fullName: "Nepali Congress", fullNameNp: "नेपाली कांग्रेस", symbol: "🌳", color: "bg-green-600", imageUrl: "" },
+        { name: "CPN (UML)", nameNp: "नेकपा (एमाले)", fullName: "CPN (UML)", fullNameNp: "नेकपा (एमाले)", symbol: "☀️", color: "bg-red-600", imageUrl: "" },
+        { name: "Maoist Centre", nameNp: "माओवादी केन्द्र", fullName: "CPN (Maoist)", fullNameNp: "नेकपा (माओवादी)", symbol: "☭", color: "bg-red-800", imageUrl: "" },
+        { name: "RSP", nameNp: "रास्वपा", fullName: "Rastriya Swatantra Party", fullNameNp: "राष्ट्रिय स्वतन्त्र पार्टी", symbol: "🔔", color: "bg-blue-500", imageUrl: "" },
+        { name: "RPP", nameNp: "राप्रपा", fullName: "Rastriya Prajatantra Party", fullNameNp: "राष्ट्रिय प्रजातन्त्र पार्टी", symbol: "🚜", color: "bg-yellow-500", imageUrl: "" },
     ];
 
     try {
-        const ai = getAiClient();
-        const langPrompt = isNp 
-            ? "Write the DESC and STANCE in Nepali language (Devanagari script)." 
-            : "Write the DESC and STANCE in English.";
-
-        const response = await ai.models.generateContent({
-            model: MODEL_NAME,
-            contents: `For each of these political parties in Nepal: ${baseParties.map(p => p.name).join(', ')}. 
-            Provide a 1-sentence description of their core ideology and a 1-sentence summary of their very latest stance or activity regarding the upcoming election.
-            
-            ${langPrompt}
-            
-            Format:
-            PARTY: [Name in English]
-            DESC: [Ideology]
-            STANCE: [Latest Stance]
-            ---`,
-            config: {
-                tools: [{ googleSearch: {} }],
-            }
-        });
-
-        const text = response.text || "";
-        const lines = text.split('\n');
+        const data = await fetchFromApi('parties', language);
         
-        const partyData: Record<string, { desc: string, stance: string }> = {};
-        let currentParty = "";
+        if (!data) {
+             // Mock Data Return
+             return baseParties.map((p, i) => ({
+                id: `party-${i}`, ...p,
+                name: isNp ? p.nameNp : p.name, fullName: isNp ? p.fullNameNp : p.fullName,
+                leader: "", description: isNp ? "नमूना विवरण (प्रिभ्यु)" : "Preview Data",
+                recentStance: isNp ? "नमूना अडान" : "Preview Stance", imageUrl: `https://picsum.photos/seed/${p.name}/400/300`
+            }));
+        }
 
-        lines.forEach(line => {
+        const partyData: Record<string, any> = {};
+        let currentParty = "";
+        data.text.split('\n').forEach((line: string) => {
             const clean = line.trim();
             if (clean.startsWith('PARTY:')) currentParty = clean.replace('PARTY:', '').trim();
             else if (clean.startsWith('DESC:') && currentParty) {
-                if (!partyData[currentParty]) partyData[currentParty] = { desc: '', stance: '' };
+                if (!partyData[currentParty]) partyData[currentParty] = {};
                 partyData[currentParty].desc = clean.replace('DESC:', '').trim();
             }
             else if (clean.startsWith('STANCE:') && currentParty) {
-                if (!partyData[currentParty]) partyData[currentParty] = { desc: '', stance: '' };
+                if (!partyData[currentParty]) partyData[currentParty] = {};
                 partyData[currentParty].stance = clean.replace('STANCE:', '').trim();
             }
         });
 
         return baseParties.map((p, i) => {
-            // Fuzzy match name
             const key = Object.keys(partyData).find(k => k.includes(p.name) || p.name.includes(k));
-            const data = key ? partyData[key] : { 
-                desc: isNp ? "नेपालको प्रमुख राजनीतिक शक्ति।" : "Major political force in Nepal.", 
-                stance: isNp ? "आगामी निर्वाचनको तयारी गर्दै।" : "Preparing for upcoming elections." 
-            };
-            
+            const info = key ? partyData[key] : { desc: "", stance: "" };
             return {
-                id: `party-${i}`,
-                ...p,
-                name: isNp ? p.nameNp : p.name,
-                fullName: isNp ? p.fullNameNp : p.fullName,
-                leader: "Loading...", 
-                description: data.desc,
-                recentStance: data.stance,
+                id: `party-${i}`, ...p,
+                name: isNp ? p.nameNp : p.name, fullName: isNp ? p.fullNameNp : p.fullName,
+                leader: "", 
+                description: info.desc || "...",
+                recentStance: info.stance || "...",
+                imageUrl: `https://picsum.photos/seed/${p.name}/400/300`
             };
         });
-
     } catch (e) {
-        console.error("Error fetching party details", e);
+        // Return base parties with error state
         return baseParties.map((p, i) => ({
-             id: `party-${i}`,
-             ...p,
-             name: isNp ? p.nameNp : p.name,
-             fullName: isNp ? p.fullNameNp : p.fullName,
-             leader: "Unknown",
-             description: isNp ? "विवरण उपलब्ध छैन।" : "Details unavailable offline.",
-             recentStance: isNp ? "पछि पुन: जाँच गर्नुहोस्।" : "Check back later.",
+             id: `party-${i}`, ...p, name: isNp ? p.nameNp : p.name, fullName: isNp ? p.fullNameNp : p.fullName, leader: "", description: "Failed to load", recentStance: "Retry later", imageUrl: ""
         }));
     }
 };
 
 export const fetchDailyHoroscope = async (language: Language): Promise<HoroscopeItem[]> => {
     try {
-        const ai = getAiClient();
-        const langInstruction = language === 'np' 
-            ? "Provide the names of the signs in Nepali (Mesh, Brish, Mithun, Karkat, Simha, Kanya, Tula, Brishchik, Dhanu, Makar, Kumbha, Meen) and the prediction in Nepali." 
-            : "Provide the names in English (Aries, Taurus, etc.) and prediction in English.";
-            
-        const response = await ai.models.generateContent({
-            model: MODEL_NAME,
-            contents: `Generate a brief daily horoscope for today (${new Date().toDateString()}) for all 12 zodiac signs. 
-            ${langInstruction}
-            
-            Format strictly as:
-            SIGN: [Sign Name]
-            PREDICTION: [One sentence prediction]
-            ICON: [Emoji]
-            ---`,
-            config: {
-                temperature: 0.7,
-            }
-        });
+        const data = await fetchFromApi('horoscope', language);
+        if (!data) return []; 
 
-        const text = response.text || "";
-        const lines = text.split('\n');
         const horoscopes: HoroscopeItem[] = [];
         let current: Partial<HoroscopeItem> = {};
-
-        lines.forEach(line => {
+        data.text.split('\n').forEach((line: string) => {
             const clean = line.trim();
             if (clean.startsWith('SIGN:')) {
                 if (current.sign) horoscopes.push(current as HoroscopeItem);
                 current = { sign: clean.replace('SIGN:', '').trim() };
-            } else if (clean.startsWith('PREDICTION:')) {
-                if (current) current.prediction = clean.replace('PREDICTION:', '').trim();
-            } else if (clean.startsWith('ICON:')) {
-                if (current) current.icon = clean.replace('ICON:', '').trim();
-            }
+            } else if (clean.startsWith('PREDICTION:')) if(current) current.prediction = clean.replace('PREDICTION:', '').trim();
+            else if (clean.startsWith('ICON:')) if(current) current.icon = clean.replace('ICON:', '').trim();
         });
         if (current.sign) horoscopes.push(current as HoroscopeItem);
-
         return horoscopes;
     } catch (e) {
-        console.error("Error fetching horoscope", e);
         return [];
     }
 };
